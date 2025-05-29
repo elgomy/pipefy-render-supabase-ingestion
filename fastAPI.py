@@ -370,86 +370,132 @@ async def trigger_crewai_analysis(case_id: str, checklist_url: str, documents_fo
 
 # --- Endpoint Principal ---
 @app.post("/webhook/pipefy")
-async def handle_pipefy_webhook(payload: PipefyWebhookPayload, request: Request, x_pipefy_signature: Optional[str] = Header(None)):
+async def handle_pipefy_webhook(request: Request, x_pipefy_signature: Optional[str] = Header(None)):
     """
     Recebe webhooks do Pipefy, processa anexos, armazena no Supabase e aciona CrewAI.
-    VERSIÓN ROBUSTA: No falla por problemas del checklist.
+    VERSIÓN ULTRA ROBUSTA: NO usa Pydantic para evitar errores 422 con tipos de datos.
     """
-    logger.info(f"INFO: Webhook Pipefy recevido. Ação: {payload.data.action if payload.data else 'N/A'}")
+    try:
+        # Capturar el cuerpo raw sin Pydantic
+        raw_body = await request.body()
+        raw_body_str = raw_body.decode('utf-8', errors='ignore')
+        
+        # Parsear JSON manualmente
+        try:
+            payload_data = json.loads(raw_body_str)
+        except json.JSONDecodeError as e:
+            logger.error(f"ERRO: JSON inválido recebido: {e}")
+            raise HTTPException(status_code=400, detail="JSON inválido")
+        
+        logger.info(f"INFO: Webhook Pipefy recevido. Raw payload length: {len(raw_body_str)}")
+        
+        # Validar estructura básica manualmente
+        if not isinstance(payload_data, dict):
+            logger.error("ERRO: Payload não é um objeto JSON válido")
+            raise HTTPException(status_code=400, detail="Payload deve ser um objeto JSON")
+        
+        data = payload_data.get('data')
+        if not data or not isinstance(data, dict):
+            logger.error("ERRO: Campo 'data' ausente ou inválido")
+            raise HTTPException(status_code=400, detail="Campo 'data' obrigatório")
+        
+        card = data.get('card')
+        if not card or not isinstance(card, dict):
+            logger.error("ERRO: Campo 'card' ausente ou inválido")
+            raise HTTPException(status_code=400, detail="Campo 'card' obrigatório")
+        
+        # Extrair e convertir card_id (SOLUCIÓN ROBUSTA)
+        card_id_raw = card.get('id')
+        if card_id_raw is None:
+            logger.error("ERRO: Campo 'card.id' ausente")
+            raise HTTPException(status_code=400, detail="Campo 'card.id' obrigatório")
+        
+        # Convertir a string sin importar el tipo original
+        card_id_str = str(card_id_raw)
+        logger.info(f"INFO: Processando card_id: {card_id_str} (original: {card_id_raw}, tipo: {type(card_id_raw)})")
+        
+        # Extraer action si existe
+        action = data.get('action', 'unknown')
+        logger.info(f"INFO: Ação: {action}")
 
-    # Validación del webhook (TEMPORALMENTE DESHABILITADA PARA DEBUG)
-    # if PIPEFY_WEBHOOK_SECRET and x_pipefy_signature:
-    #     try:
-    #         import hmac
-    #         import hashlib
-    #         
-    #         raw_body = await request.body()
-    #         signature_calculated = hmac.new(
-    #             PIPEFY_WEBHOOK_SECRET.encode(),
-    #             raw_body,
-    #             hashlib.sha256
-    #         ).hexdigest()
-    #         
-    #         if not hmac.compare_digest(signature_calculated, x_pipefy_signature):
-    #             logger.warning(f"ALERTA: Assinatura do webhook inválida! Acesso não autorizado.")
-    #             raise HTTPException(status_code=401, detail="Assinatura de webhook inválida")
-    #         
-    #         logger.info("INFO: Validação de assinatura do webhook bem-sucedida.")
-    #     except Exception as e:
-    #         logger.error(f"ERRO ao validar assinatura do webhook: {e}")
-    #         raise HTTPException(status_code=500, detail=f"Erro na validação: {str(e)}")
+        # Validación del webhook (TEMPORALMENTE DESHABILITADA PARA DEBUG)
+        # if PIPEFY_WEBHOOK_SECRET and x_pipefy_signature:
+        #     try:
+        #         import hmac
+        #         import hashlib
+        #         
+        #         signature_calculated = hmac.new(
+        #             PIPEFY_WEBHOOK_SECRET.encode(),
+        #             raw_body,
+        #             hashlib.sha256
+        #         ).hexdigest()
+        #         
+        #         if not hmac.compare_digest(signature_calculated, x_pipefy_signature):
+        #             logger.warning(f"ALERTA: Assinatura do webhook inválida! Acesso não autorizado.")
+        #             raise HTTPException(status_code=401, detail="Assinatura de webhook inválida")
+        #         
+        #         logger.info("INFO: Validação de assinatura do webhook bem-sucedida.")
+        #     except Exception as e:
+        #         logger.error(f"ERRO ao validar assinatura do webhook: {e}")
+        #         raise HTTPException(status_code=500, detail=f"Erro na validação: {str(e)}")
 
-    if not payload.data or not payload.data.card or not payload.data.card.id:
-        logger.error("ERRO: Payload do webhook inválido ou sem ID do card.")
-        raise HTTPException(status_code=400, detail="Payload inválido ou ID do card ausente.")
-    
-    card_id_str = str(payload.data.card.id)
-    logger.info(f"INFO: Processando card_id: {card_id_str}")
+        # Procesar documentos anexos del card
+        attachments_from_pipefy = await get_pipefy_card_attachments(card_id_str)
+        processed_documents_for_crewai: List[Dict[str, Any]] = []
 
-    # Procesar documentos anexos del card
-    attachments_from_pipefy = await get_pipefy_card_attachments(card_id_str)
-    processed_documents_for_crewai: List[Dict[str, Any]] = []
-
-    if not attachments_from_pipefy:
-        logger.info(f"INFO: Nenhum anexo encontrado para o card {card_id_str}.")
-    else:
-        logger.info(f"INFO: {len(attachments_from_pipefy)} anexos encontrados para o card {card_id_str}.")
-        for att in attachments_from_pipefy:
-            logger.info(f"INFO: Processando anexo: {att.name}...")
-            
-            temp_file = await download_file_to_temp(att.path, att.name)
-            if temp_file:
-                storage_url = await upload_to_supabase_storage_async(temp_file, card_id_str, att.name)
-                if storage_url:
-                    document_tag = await determine_document_tag(att.name)
-                    success_db = await register_document_in_db(card_id_str, att.name, document_tag, storage_url)
-                    if success_db:
-                        processed_documents_for_crewai.append({
-                            "name": att.name,
-                            "file_url": storage_url,
-                            "document_tag": document_tag
-                        })
+        if not attachments_from_pipefy:
+            logger.info(f"INFO: Nenhum anexo encontrado para o card {card_id_str}.")
+        else:
+            logger.info(f"INFO: {len(attachments_from_pipefy)} anexos encontrados para o card {card_id_str}.")
+            for att in attachments_from_pipefy:
+                logger.info(f"INFO: Processando anexo: {att.name}...")
+                
+                temp_file = await download_file_to_temp(att.path, att.name)
+                if temp_file:
+                    storage_url = await upload_to_supabase_storage_async(temp_file, card_id_str, att.name)
+                    if storage_url:
+                        document_tag = await determine_document_tag(att.name)
+                        success_db = await register_document_in_db(card_id_str, att.name, document_tag, storage_url)
+                        if success_db:
+                            processed_documents_for_crewai.append({
+                                "name": att.name,
+                                "file_url": storage_url,
+                                "document_tag": document_tag
+                            })
+                    else:
+                        logger.warning(f"ALERTA: Falha ao fazer upload do anexo '{att.name}' para Supabase Storage.")
                 else:
-                    logger.warning(f"ALERTA: Falha ao fazer upload do anexo '{att.name}' para Supabase Storage.")
-            else:
-                logger.warning(f"ALERTA: Falha ao baixar o anexo '{att.name}' do Pipefy.")
-    
-    logger.info(f"INFO: {len(processed_documents_for_crewai)} documentos preparados para CrewAI.")
+                    logger.warning(f"ALERTA: Falha ao baixar o anexo '{att.name}' do Pipefy.")
+        
+        logger.info(f"INFO: {len(processed_documents_for_crewai)} documentos preparados para CrewAI.")
 
-    # Obtener URL del checklist de forma robusta (NO falla)
-    logger.info("INFO: Buscando URL do checklist...")
-    checklist_url = await get_checklist_url_from_supabase()
-    logger.info(f"INFO: URL do checklist: {checklist_url}")
-    
-    # Activar CrewAI (simulado)
-    logger.info(f"INFO: Acionando CrewAI para o case_id: {card_id_str}")
-    crewai_response = await trigger_crewai_analysis(card_id_str, checklist_url, processed_documents_for_crewai)
+        # Obtener URL del checklist de forma robusta (NO falla)
+        logger.info("INFO: Buscando URL do checklist...")
+        checklist_url = await get_checklist_url_from_supabase()
+        logger.info(f"INFO: URL do checklist: {checklist_url}")
+        
+        # Activar CrewAI (simulado)
+        logger.info(f"INFO: Acionando CrewAI para o case_id: {card_id_str}")
+        crewai_response = await trigger_crewai_analysis(card_id_str, checklist_url, processed_documents_for_crewai)
 
-    return {
-        "status": "success",
-        "message": f"Webhook para card {card_id_str} processado. {len(processed_documents_for_crewai)} anexos manuseados e enviados para CrewAI.",
-        "crewai_trigger_response": crewai_response
-    }
+        return {
+            "status": "success",
+            "message": f"Webhook para card {card_id_str} processado. {len(processed_documents_for_crewai)} anexos manuseados e enviados para CrewAI.",
+            "crewai_trigger_response": crewai_response,
+            "card_id_original": card_id_raw,
+            "card_id_processed": card_id_str,
+            "card_id_type_original": str(type(card_id_raw)),
+            "no_pydantic_validation": True
+        }
+        
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"ERRO inesperado no webhook: {e}")
+        import traceback
+        logger.error(f"TRACEBACK: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Erro interno: {str(e)}")
 
 @app.post("/webhook/pipefy/debug")
 async def debug_pipefy_webhook(request: Request):
