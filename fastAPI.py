@@ -17,6 +17,7 @@ from fastapi import FastAPI, HTTPException, Request, Header
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
+import json
 
 # Cargar variables de entorno
 load_dotenv()
@@ -67,16 +68,22 @@ app = FastAPI(lifespan=lifespan, title="Pipefy-Supabase-CrewAI Integration")
 
 # Modelos Pydantic (iguales al original)
 class PipefyCard(BaseModel):
+    model_config = {"extra": "allow"}  # Permitir campos adicionales
+    
     id: str
     title: Optional[str] = None
     current_phase: Optional[Dict[str, Any]] = None
     fields: Optional[List[Dict[str, Any]]] = None
 
 class PipefyEventData(BaseModel):
+    model_config = {"extra": "allow"}  # Permitir campos adicionales
+    
     card: PipefyCard
     action: Optional[str] = None
 
 class PipefyWebhookPayload(BaseModel):
+    model_config = {"extra": "allow"}  # Permitir campos adicionales
+    
     data: PipefyEventData
 
 class PipefyAttachment(BaseModel):
@@ -464,6 +471,67 @@ async def debug_pipefy_webhook(request: Request):
         
     except Exception as e:
         logger.error(f"Error en debug webhook: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.post("/webhook/pipefy/raw")
+async def raw_pipefy_webhook(request: Request):
+    """Webhook raw que acepta cualquier payload sin validación Pydantic"""
+    try:
+        # Capturar todo sin validación
+        raw_body = await request.body()
+        headers = dict(request.headers)
+        
+        # Intentar parsear JSON
+        try:
+            json_data = json.loads(raw_body.decode('utf-8'))
+        except Exception as parse_error:
+            logger.error(f"Error parseando JSON: {parse_error}")
+            return {"status": "error", "message": f"JSON inválido: {parse_error}"}
+        
+        # Log detallado
+        logger.info("=== WEBHOOK RAW (SIN VALIDACIÓN PYDANTIC) ===")
+        logger.info(f"Headers: {headers}")
+        logger.info(f"JSON recibido: {json.dumps(json_data, indent=2)}")
+        
+        # Intentar extraer card_id de diferentes estructuras posibles
+        card_id = None
+        
+        # Estructura estándar: data.card.id
+        if isinstance(json_data, dict):
+            if "data" in json_data and isinstance(json_data["data"], dict):
+                if "card" in json_data["data"] and isinstance(json_data["data"]["card"], dict):
+                    card_id = json_data["data"]["card"].get("id")
+            
+            # Estructura alternativa: card.id directo
+            if not card_id and "card" in json_data and isinstance(json_data["card"], dict):
+                card_id = json_data["card"].get("id")
+            
+            # Estructura alternativa: card_id directo
+            if not card_id:
+                card_id = json_data.get("card_id")
+        
+        logger.info(f"Card ID extraído: {card_id}")
+        
+        if card_id:
+            logger.info(f"✅ Webhook raw procesado exitosamente para card: {card_id}")
+            return {
+                "status": "success", 
+                "message": f"Webhook raw procesado para card {card_id}",
+                "card_id": card_id,
+                "structure_detected": "valid"
+            }
+        else:
+            logger.warning("⚠️ No se pudo extraer card_id del payload")
+            return {
+                "status": "warning", 
+                "message": "Payload recibido pero sin card_id válido",
+                "structure_detected": "unknown"
+            }
+        
+        logger.info("=== FIN WEBHOOK RAW ===")
+        
+    except Exception as e:
+        logger.error(f"Error en webhook raw: {e}")
         return {"status": "error", "message": str(e)}
 
 @app.get("/")
