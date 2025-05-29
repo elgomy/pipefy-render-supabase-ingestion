@@ -12,12 +12,13 @@ import tempfile
 import httpx
 import logging
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from fastapi import FastAPI, HTTPException, Request, Header
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import json
+from datetime import datetime
 
 # Cargar variables de entorno
 load_dotenv()
@@ -70,10 +71,16 @@ app = FastAPI(lifespan=lifespan, title="Pipefy-Supabase-CrewAI Integration")
 class PipefyCard(BaseModel):
     model_config = {"extra": "allow"}  # Permitir campos adicionales
     
-    id: str
+    id: Union[str, int]  # Aceptar tanto string como integer
     title: Optional[str] = None
     current_phase: Optional[Dict[str, Any]] = None
     fields: Optional[List[Dict[str, Any]]] = None
+    
+    @field_validator('id')
+    @classmethod
+    def convert_id_to_string(cls, v):
+        """Convierte el ID a string sin importar si viene como int o str"""
+        return str(v)
 
 class PipefyEventData(BaseModel):
     model_config = {"extra": "allow"}  # Permitir campos adicionales
@@ -321,8 +328,6 @@ async def get_checklist_url_from_supabase(config_name: str = "checklist_cadastro
 
 async def trigger_crewai_analysis(case_id: str, checklist_url: str, documents_for_crew: List[Dict]):
     """Simula la análisis de CrewAI registrando la información en logs."""
-    from datetime import datetime
-    
     # Crear el payload que se enviaría a CrewAI
     payload = CrewAIInput(
         case_id=case_id,
@@ -547,3 +552,96 @@ async def health_check():
         "pipefy_configured": bool(PIPEFY_TOKEN),
         "storage_bucket": SUPABASE_STORAGE_BUCKET_NAME
     }
+
+@app.post("/webhook/ultimate-debug")
+async def ultimate_debug_webhook(request: Request):
+    """
+    🔥 ULTIMATE DEBUG - Captura TODO sin validaciones
+    Este endpoint NO usa Pydantic y acepta CUALQUIER cosa
+    """
+    try:
+        # Capturar ABSOLUTAMENTE TODO
+        method = request.method
+        url = str(request.url)
+        headers = dict(request.headers)
+        query_params = dict(request.query_params)
+        
+        # Capturar el cuerpo raw
+        raw_body = await request.body()
+        raw_body_str = raw_body.decode('utf-8', errors='ignore')
+        
+        # Intentar parsear JSON
+        json_data = None
+        json_error = None
+        try:
+            json_data = json.loads(raw_body_str)
+        except Exception as e:
+            json_error = str(e)
+        
+        # Timestamp
+        timestamp = datetime.now().isoformat()
+        
+        # LOG ULTRA DETALLADO
+        logger.info("🔥🔥🔥 ULTIMATE DEBUG WEBHOOK 🔥🔥🔥")
+        logger.info(f"Timestamp: {timestamp}")
+        logger.info(f"Method: {method}")
+        logger.info(f"URL: {url}")
+        logger.info(f"Query Params: {query_params}")
+        logger.info("=" * 50)
+        logger.info("HEADERS:")
+        for key, value in headers.items():
+            logger.info(f"  {key}: {value}")
+        logger.info("=" * 50)
+        logger.info(f"Raw Body Length: {len(raw_body)} bytes")
+        logger.info(f"Raw Body (first 1000 chars): {raw_body_str[:1000]}")
+        if len(raw_body_str) > 1000:
+            logger.info(f"Raw Body (last 500 chars): ...{raw_body_str[-500:]}")
+        logger.info("=" * 50)
+        
+        if json_data:
+            logger.info("JSON PARSED SUCCESSFULLY:")
+            logger.info(json.dumps(json_data, indent=2, ensure_ascii=False))
+            
+            # Analizar estructura
+            logger.info("=" * 50)
+            logger.info("STRUCTURE ANALYSIS:")
+            
+            def analyze_structure(obj, path=""):
+                if isinstance(obj, dict):
+                    logger.info(f"  {path} (dict) - keys: {list(obj.keys())}")
+                    for key, value in obj.items():
+                        analyze_structure(value, f"{path}.{key}" if path else key)
+                elif isinstance(obj, list):
+                    logger.info(f"  {path} (list) - length: {len(obj)}")
+                    if obj:
+                        analyze_structure(obj[0], f"{path}[0]")
+                else:
+                    logger.info(f"  {path} ({type(obj).__name__}): {str(obj)[:100]}")
+            
+            analyze_structure(json_data)
+            
+        else:
+            logger.info(f"JSON PARSE ERROR: {json_error}")
+        
+        logger.info("🔥🔥🔥 END ULTIMATE DEBUG 🔥🔥🔥")
+        
+        # Respuesta exitosa SIEMPRE
+        return {
+            "status": "ultimate_debug_success",
+            "message": "Payload capturado exitosamente",
+            "timestamp": timestamp,
+            "data_received": json_data is not None,
+            "body_length": len(raw_body),
+            "headers_count": len(headers)
+        }
+        
+    except Exception as e:
+        logger.error(f"🔥 ULTIMATE DEBUG ERROR: {e}")
+        import traceback
+        logger.error(f"🔥 TRACEBACK: {traceback.format_exc()}")
+        
+        return {
+            "status": "ultimate_debug_error",
+            "message": f"Error en ultimate debug: {e}",
+            "timestamp": datetime.now().isoformat()
+        }
