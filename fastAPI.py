@@ -14,7 +14,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Any, Union
 from fastapi import FastAPI, HTTPException, Request, Header
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from supabase import create_client, Client
 from dotenv import load_dotenv
 import json
@@ -71,16 +71,18 @@ app = FastAPI(lifespan=lifespan, title="Pipefy-Supabase-CrewAI Integration")
 class PipefyCard(BaseModel):
     model_config = {"extra": "allow"}  # Permitir campos adicionales
     
-    id: Union[str, int]  # Aceptar tanto string como integer
+    id: str  # Mantener como string pero convertir en el validator
     title: Optional[str] = None
     current_phase: Optional[Dict[str, Any]] = None
     fields: Optional[List[Dict[str, Any]]] = None
     
-    @field_validator('id')
+    @model_validator(mode='before')
     @classmethod
-    def convert_id_to_string(cls, v):
+    def convert_id_to_string(cls, data):
         """Convierte el ID a string sin importar si viene como int o str"""
-        return str(v)
+        if isinstance(data, dict) and 'id' in data:
+            data['id'] = str(data['id'])
+        return data
 
 class PipefyEventData(BaseModel):
     model_config = {"extra": "allow"}  # Permitir campos adicionales
