@@ -74,6 +74,7 @@ class PipefyCard(BaseModel):
     id: str  # Mantener como string pero convertir en el validator
     title: Optional[str] = None
     current_phase: Optional[Dict[str, Any]] = None
+    pipe: Optional[Dict[str, Any]] = None  # Agregar información del pipe
     fields: Optional[List[Dict[str, Any]]] = None
     
     @model_validator(mode='before')
@@ -268,7 +269,7 @@ async def determine_document_tag(filename: str, card_fields: Optional[List[Dict]
     
     return "outro_documento"
 
-async def register_document_in_db(case_id: str, document_name: str, document_tag: str, file_url: str):
+async def register_document_in_db(case_id: str, document_name: str, document_tag: str, file_url: str, pipe_id: Optional[str] = None):
     """Registra um documento na tabela 'documents' do Supabase."""
     if not supabase_client:
         logger.error("ERRO: Cliente Supabase não inicializado.")
@@ -282,6 +283,11 @@ async def register_document_in_db(case_id: str, document_name: str, document_tag
             "file_url": file_url,
             "status": "uploaded"
         }
+        
+        # Agregar pipe_id si está disponible
+        if pipe_id:
+            data_to_insert["pipe_id"] = pipe_id
+            logger.info(f"INFO: Registrando documento con pipe_id: {pipe_id}")
         
         response = await asyncio.to_thread(
             supabase_client.table("documents").upsert(data_to_insert, on_conflict="case_id, name").execute
@@ -414,6 +420,17 @@ async def handle_pipefy_webhook(request: Request, x_pipefy_signature: Optional[s
         card_id_str = str(card_id_raw)
         logger.info(f"INFO: Processando card_id: {card_id_str} (original: {card_id_raw}, tipo: {type(card_id_raw)})")
         
+        # Extraer pipe_id si está disponible
+        pipe_id = None
+        if 'pipe' in card and isinstance(card['pipe'], dict):
+            pipe_id = card['pipe'].get('id')
+            if pipe_id:
+                pipe_id = str(pipe_id)  # Convertir a string
+                logger.info(f"INFO: Pipe ID encontrado: {pipe_id}")
+        
+        if not pipe_id:
+            logger.info("INFO: Pipe ID no encontrado en el payload del card")
+        
         # Extraer action si existe
         action = data.get('action', 'unknown')
         logger.info(f"INFO: Ação: {action}")
@@ -455,7 +472,7 @@ async def handle_pipefy_webhook(request: Request, x_pipefy_signature: Optional[s
                     storage_url = await upload_to_supabase_storage_async(temp_file, card_id_str, att.name)
                     if storage_url:
                         document_tag = await determine_document_tag(att.name)
-                        success_db = await register_document_in_db(card_id_str, att.name, document_tag, storage_url)
+                        success_db = await register_document_in_db(card_id_str, att.name, document_tag, storage_url, pipe_id)
                         if success_db:
                             processed_documents_for_crewai.append({
                                 "name": att.name,
